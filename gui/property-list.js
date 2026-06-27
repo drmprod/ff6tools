@@ -1059,28 +1059,12 @@ class ROMPropertyList {
         const controlDiv = document.createElement('div');
         controlDiv.classList.add('property-control-div');
 
-        // Check if this is an editable dialogue/text object
-        if (object.setText && typeof object.setText === 'function') {
-            // This is a text-editable object like ROMText
-            const input = document.createElement('textarea');
-            input.id = options.controlID;
-            input.value = object.fString ? object.fString() : (object.text || '');
-            input.disabled = object.disabled || options.disabled;
-            input.classList.add('property-control');
-            input.classList.add('property-textarea');
-            input.onchange = function() {
-                object.setText(this.value);
-                document.getElementById(this.id).focus();
-            };
-            controlDiv.appendChild(input);
-        } else {
-            // This is a read-only string display
-            const stringDiv = document.createElement('div');
-            stringDiv.classList.add('property-control-div');
-            stringDiv.innerHTML = object.fString ? object.fString() : object;
-            stringDiv.id = options.controlID;
-            controlDiv.appendChild(stringDiv);
-        }
+        // create a div for the string
+        const stringDiv = document.createElement('div');
+        stringDiv.classList.add('property-control-div');
+        stringDiv.innerHTML = object.fString();
+        stringDiv.id = options.controlID;
+        controlDiv.appendChild(stringDiv);
 
         return controlDiv;
     }
