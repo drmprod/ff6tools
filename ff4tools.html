@@ -27,7 +27,57 @@
         <script>
 
             var rom, definition, data, modal, definitions;
-            var propertyList, scriptList;
+            var propertyList, scriptList, romNavigator;
+
+            // Custom text-only hierarchy for FF4 SNES
+            var textOnlyHierarchy = [
+                {
+                    name: 'Dialogue',
+                    list: [
+                        {
+                            name: 'Event Dialog 1',
+                            path: 'eventDialog1'
+                        }, {
+                            name: 'Event Dialog 2',
+                            path: 'eventDialog2'
+                        }, {
+                            name: 'Battle Dialog',
+                            path: 'battleDialog'
+                        }, {
+                            name: 'Battle Messages',
+                            path: 'battleMessage'
+                        }
+                    ]
+                }, {
+                    name: 'Names',
+                    list: [
+                        {
+                            name: 'Character Names',
+                            path: 'characterNames'
+                        }, {
+                            name: 'Item Names',
+                            path: 'itemNames'
+                        }, {
+                            name: 'Spell Names',
+                            path: 'spellNames'
+                        }, {
+                            name: 'Attack Names',
+                            path: 'attackNames'
+                        }, {
+                            name: 'Battle Command Names',
+                            path: 'battleCommandNames'
+                        }
+                    ]
+                }, {
+                    name: 'Other Text',
+                    list: [
+                        {
+                            name: 'Map Titles',
+                            path: 'mapTitle'
+                        }
+                    ]
+                }
+            ];
 
             window.onload = function() {
 
@@ -135,8 +185,11 @@
                     for (var i = 0; i < keys.length; i++) {
                         var key = keys[i];
                         var def = definitions[key];
-                        var li = liForDefinition(def, def.url);
-                        ul.appendChild(li);
+                        // Only show FF4 definitions
+                        if (def.key && def.key.startsWith('ff4')) {
+                            var li = liForDefinition(def, def.url);
+                            ul.appendChild(li);
+                        }
                     }
                     content.appendChild(ul);
 
@@ -168,7 +221,12 @@
                         var def = definitions[key];
                         if (!isArray(def.crc32)) continue;
                         for (const defCRC32 of def.crc32) {
-                            if (Number(defCRC32) === fileCRC32) url = def.url;
+                            if (Number(defCRC32) === fileCRC32) {
+                                // Only allow FF4 ROMs
+                                if (def.key && def.key.startsWith('ff4')) {
+                                    url = def.url;
+                                }
+                            }
                         }
                         if (url) break;
                     }
@@ -238,14 +296,19 @@
                     propertyList.hideEditor();
                 }
                 propertyList = new ROMPropertyList(rom);
-                if (rom.textProperties && rom.textProperties.assembly && rom.textProperties.assembly.editor)
-                    propertyList.getEditor(rom.textProperties.assembly.editor);
+                
+                // Create custom navigator with text-only hierarchy
                 romNavigator = new ROMNavigator(rom);
+                romNavigator.hierarchy = textOnlyHierarchy;
+                romNavigator.resetList();
+
                 scriptList = new ROMScriptList(rom);
 
-                // select the first text entry
-                if (rom.textProperties) {
-                    propertyList.select(rom.textProperties.item(0));
+                // Try to select the first text entry
+                if (rom.eventDialog1) {
+                    propertyList.select(rom.eventDialog1.item(0));
+                } else if (rom.battleDialog) {
+                    propertyList.select(rom.battleDialog.item(0));
                 }
             }
 
@@ -497,7 +560,7 @@
 
                 <button class="icon-btn float-right"
                         onclick="togglePane('right-pane')"
-                        aria-label="Show/Hide Text List"
+                        aria-label="Show/Hide Text Properties"
                         data-balloon-pos="down-right">
                     <i class="fas fa-angle-double-right"></i>
                 </button>
