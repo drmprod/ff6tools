@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en-US">
+    <head>
+        <meta charset="UTF-8">
+        <title>FF4 SNES Text Editor</title>
+        <meta name="description" content="Browser-Based Text Editor for Final Fantasy IV SNES ROM">
+        <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.15.1/css/all.css" crossorigin="anonymous">
+        <link rel="stylesheet" href="css/balloon.css" />
+        <link rel="stylesheet" href="css/ff6tools.css" />
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.5.0/jszip.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/1.0.10/pako.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/3.14.1/js-yaml.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/base64-js@1.5.1/base64js.min.js"></script>
+        <script src="lib/apultra.js"></script>
+        <script src="rom/tose70.js"></script>
+        <script src="rom/romtools.js"></script>
+        <script src="rom/rom-observer.js"></script>
+        <script src="rom/rom-script-delegate.js"></script>
+        <script src="gui/romgui.js"></script>
+        <script src="gui/editor.js"></script>
+        <script src="gui/menu.js"></script>
+        <script src="gui/navigator.js"></script>
+        <script src="gui/property-list.js"></script>
+        <script src="ff4/ff4-script.js"></script>
+        <script>
+
+            var rom, definition, data, modal, definitions;
+            var propertyList, scriptList;
+
+            window.onload = function() {
+
+                // read the list of definition files
+                var xhr = new XMLHttpRequest();
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState != 4 || xhr.status !== 200) return;
+                    definitions = JSON.parse(xhr.responseText);
+                };
+                xhr.onerror = function() {
+                    console.log('Unable to load ROM definitions');
+                };
+                xhr.open('get', 'rom/def.json');
+                xhr.send();
+
+                modal = document.getElementById('modal');
+
+                window.addEventListener('click', onclick);
+
+                var romFile = document.getElementById('rom-file');
+                romFile.onchange = selectROM;
+
+                // close the modal when the user clicks on <span> (x)
+                var closeButton = document.getElementById('modal-close');
+                closeButton.onclick = closeModal;
+
+                document.addEventListener('keydown', function(e) {
+                    if (e.which === 90 && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        e.shiftKey ? redo() : undo();
+                    } else if (e.which === 89 && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        redo();
+                    } else if (e.which === 79 && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        document.getElementById('rom-file').click();
+                    } else if (e.which === 83 && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        saveROM();
+                    }
+                });
+            }
+
+            window.onbeforeunload = function() {
+                return 'Are you sure you want to leave?';
+            };
+
+            // When the user clicks anywhere outside of the modal, close it
+            function onclick(e) {
+                if (e.target === modal) {
+                    closeModal();
+                }
+            }
+
+            function openModal(title) {
+                modal.style.display = 'flex';
+
+                var modalTitle = document.getElementById('modal-title');
+                modalTitle.innerHTML = title;
+
+                var content = document.getElementById('modal-content');
+                content.innerHTML = '';
+                return content;
+            }
+
+            function closeModal() {
+                modal.style.display = 'none';
+            }
+
+            function selectROM() {
+
+                var romfile = document.getElementById('rom-file');
+                if (!romfile || !romfile.files[0]) return;
+                var file = romfile.files[0];
+                romfile.value = null;
+                var filereader = new FileReader();
+                filereader.readAsArrayBuffer(file);
+                filereader.onload = function() {
+
+                    // get the file as a byte array
+                    var arrayBuffer = filereader.result;
+                    data = new Uint8Array(arrayBuffer);
+
+                    // load built-in definition
+                    if (loadBuiltInDefinition()) return;
+
+                    // try removing a 512 byte copier header
+                    if (data.length % 0x0400 === 0x0200) {
+                        data = data.slice(0x0200);
+                        if (loadBuiltInDefinition()) return;
+                    }
+
+                    // prompt the user to load their own definition
+                    var content = openModal('Select Definition');
+                    var p = document.createElement('p');
+                    p.innerHTML = 'The CRC32 of this ROM does not match any ' +
+                        'built-in definitions. Please select a built-in ' +
+                        'definition manually from the list or choose a ' +
+                        'custom definition file.';
+                    content.appendChild(p);
+
+                    var ul = document.createElement('ul');
+                    ul.classList.add('modal-list');
+                    var keys = Object.keys(definitions);
+                    for (var i = 0; i < keys.length; i++) {
+                        var key = keys[i];
+                        var def = definitions[key];
+                        var li = liForDefinition(def, def.url);
+                        ul.appendChild(li);
+                    }
+                    content.appendChild(ul);
+
+                    var file = document.createElement('input');
+                    file.type = 'file';
+                    file.id = 'definition-file';
+                    file.onchange = loadUserDefinition;
+                    content.appendChild(file);
+                };
+            }
+
+            function liForDefinition(def, url) {
+                var li = document.createElement('li');
+                li.onclick = function(e) {
+                    closeModal();
+                    loadBuiltInDefinition(url);
+                }
+                li.innerHTML = def.name;
+                return li;
+            }
+
+            function loadBuiltInDefinition(url) {
+
+                if (!url) {
+                    var fileCRC32 = ROM.crc32(data);
+
+                    if (!definitions) return false;
+                    for (const key in definitions) {
+                        var def = definitions[key];
+                        if (!isArray(def.crc32)) continue;
+                        for (const defCRC32 of def.crc32) {
+                            if (Number(defCRC32) === fileCRC32) url = def.url;
+                        }
+                        if (url) break;
+                    }
+                }
+
+                if (!url) return false;
+
+                var xhr = new XMLHttpRequest();
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState != 4 || xhr.status !== 200) return;
+                    if (url.endsWith('yaml') || url.endsWith('yml')) {
+                        definition = jsyaml.safeLoad(xhr.responseText);
+                    } else {
+                        definition = JSON.parse(xhr.responseText);
+                    }
+
+                    loadROM();
+                };
+                xhr.onerror = function() {
+                    console.log(`Error opening ROM definition: ${url}`);
+                };
+                xhr.open('get', url);
+                xhr.send();
+
+                return true;
+            }
+
+            function loadUserDefinition() {
+
+                closeModal();
+
+                var definitionfile = document.getElementById('definition-file');
+                if (!definitionfile || !definitionfile.files[0]) return;
+                var file = definitionfile.files[0];
+                definitionfile.value = null;
+                var filereader = new FileReader();
+                filereader.readAsText(file);
+                filereader.onload = function() {
+
+                    // get the file as a byte array
+                    var textBuffer = filereader.result;
+                    if (file.name.endsWith('yaml') || file.name.endsWith('yml')) {
+                        definition = jsyaml.safeLoad(textBuffer);
+                    } else {
+                        definition = JSON.parse(textBuffer);
+                    }
+
+                    loadROM();
+                };
+            }
+
+            function loadROM() {
+
+                if (!data || !definition) return;
+
+                // create the rom object
+                rom = ROMObject.create(null, definition);
+                rom.disassemble(data);
+
+                console.log(`CRC32: ${hexString(ROM.crc32(data), 8)}`);
+                if (rom.isSFC) {
+                    console.log(`SNES Checksum: ${hexString(ROM.checksum(data), 4)}`);
+                }
+
+                // create gui objects
+                if (propertyList) {
+                    propertyList.hideEditor();
+                }
+                propertyList = new ROMPropertyList(rom);
+                if (rom.textProperties && rom.textProperties.assembly && rom.textProperties.assembly.editor)
+                    propertyList.getEditor(rom.textProperties.assembly.editor);
+                romNavigator = new ROMNavigator(rom);
+                scriptList = new ROMScriptList(rom);
+
+                // select the first text entry
+                if (rom.textProperties) {
+                    propertyList.select(rom.textProperties.item(0));
+                }
+            }
+
+            function saveROM(forceSave) {
+
+                if (!rom) return;
+
+                if (!rom.assemble()) {
+                    if (forceSave) {
+                        showOrphans();
+                    } else {
+                        chooseExpandMode();
+                        return;
+                    }
+                }
+
+                if (rom.saveRomOnly) {
+                    const blob = new Blob([rom.data]);
+                    url = window.URL.createObjectURL(blob);
+
+                    // create a link element, hide it, direct it towards the blob,
+                    // and then 'click' it programatically
+                    var a = document.createElement("a");
+                    a.style = "display: none";
+                    document.body.appendChild(a);
+
+                    a.href = url;
+                    a.download = `${rom.name}.${rom.system}`;
+                    a.click();
+
+                    // release the reference to the file by revoking the Object URL
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    return;
+                }
+
+                var definition;
+                var definitionFilename;
+                if (rom.definitionFormat === 'yaml') {
+                    definition = jsyaml.safeDump(rom.definition, {
+                        indent: 4,
+                        skipInvalid: true
+                    });
+                    definitionFilename = `${rom.name}.yml`;
+                } else {
+                    definition = JSON.stringify(rom.definition, null, 4);
+                    definitionFilename = `${rom.name}.json`;
+                }
+
+                // update the script list since the script references will change
+                scriptList.update();
+
+                // create a zip file with the rom and the definition file
+                var zip = new JSZip();
+                zip.file(`${rom.name}.${rom.system}`, rom.data);
+                zip.file(definitionFilename, definition);
+                zip.file('ROM Map.txt', rom.romMapText());
+
+                zip.generateAsync({ type: 'blob' }).then(function(content) {
+                    // see FileSaver.js
+                    saveAs(content, `${rom.name}.zip`);
+                });
+            }
+
+            function chooseExpandMode() {
+                var content = openModal("Save ROM");
+
+                var p = document.createElement('p');
+                p.innerHTML = 'Some data has increased in size and no ' +
+                    'longer fits in its allotted range. What would you like ' +
+                    'to do?';
+                content.appendChild(p);
+
+                function createExpandRadio(expandMode, description) {
+                    var div = document.createElement('div');
+                    div.classList.add('expand-div');
+                    var button = document.createElement('input');
+                    button.type = 'radio';
+                    button.id = `expand-${expandMode}`;
+                    button.classList.add('expand-radio');
+                    button.name = 'expandMode';
+                    button.value = expandMode;
+                    button.checked = (rom.expandMode === button.value);
+                    div.appendChild(button);
+                    var label = document.createElement('label');
+                    label.htmlFor = button.id;
+                    label.innerHTML = description;
+                    div.appendChild(label);
+                    content.appendChild(div);
+                }
+
+                createExpandRadio(ROMData.ExpandMode.truncate,
+                    '<b>Truncate:</b> Data will be truncated to fit its ' +
+                    'range (Default behavior, may result in loss of data)');
+                createExpandRadio(ROMData.ExpandMode.overwrite,
+                    '<b>Overwrite:</b> Data will overwrite adjacent data ' +
+                    '(May result in corruption of data, not recommended ' +
+                    'unless using Steam ROM)');
+                createExpandRadio(ROMData.ExpandMode.relocate,
+                    '<b>Relocate:</b> Modified data will be relocated ' +
+                    'automatically if space is available elsewhere ' +
+                    '(Recommended, may result in loss of compatibility ' +
+                    'with patches and other utilities)');
+                createExpandRadio(ROMData.ExpandMode.optimize,
+                    '<b>Optimize:</b> All possible data will be relocated ' +
+                    'to optimize use of free space (Recommended if unable ' +
+                    'to relocate, may result in loss of compatibility with ' +
+                    'patches and other utilities)');
+                if (rom.isSFC) createExpandRadio(ROMData.ExpandMode.expand,
+                    '<b>Expand:</b> The ROM will be expanded and data will ' +
+                    'be relocated to the expanded area automatically ' +
+                    '(SNES/SFC only)');
+
+                var okay = document.createElement('button');
+                okay.innerHTML = 'Okay';
+                okay.onclick = function() {
+                    closeModal();
+                    var radioButtons = document.getElementsByClassName('expand-radio');
+                    for (var i = 0; i < radioButtons.length; i++) {
+                        var button = radioButtons[i];
+                        if (!button.checked) continue;
+                        if (button.value === ROMData.ExpandMode.expand) {
+                            rom.expand(rom.data.length + 0x100000);
+                            if (rom.expandMode !== ROMData.ExpandMode.optimize) {
+                                rom.expandMode = ROMData.ExpandMode.relocate;
+                            }
+                        } else {
+                            rom.expandMode = button.value;
+                        }
+                        saveROM(true);
+                        break;
+                    }
+                };
+                content.appendChild(okay);
+
+                var cancel = document.createElement('button');
+                cancel.innerHTML = 'Cancel';
+                cancel.onclick = function() { closeModal(); };
+                content.appendChild(cancel);
+            }
+
+            function showOrphans() {
+                var content = openModal('Save ROM');
+                var p = document.createElement('p');
+                content.appendChild(p);
+                if (!rom.orphans || !rom.orphans.length) {
+                    p.innerHTML = 'Unable to save ROM. ' +
+                        'Try optimizing or expanding.';
+                    return;
+                }
+                p.innerHTML = 'Failed to save the data listed below. ' +
+                    'Try optimizing or expanding.';
+
+                var ul = document.createElement('ul');
+                content.appendChild(ul);
+                ul.classList.add('modal-list');
+                for (var i = 0; i < rom.orphans.length; i++) {
+                    var assembly = rom.orphans[i];
+                    var li = document.createElement('li');
+                    li.innerHTML = assembly.name || assembly.key;
+                    if (!assembly.canRelocate) {
+                        li.innerHTML += ' (cannot relocate)';
+                    } else {
+                        li.innerHTML += ` (${assembly.assembledLength} bytes)`;
+                    }
+                    ul.appendChild(li);
+                }
+            }
+
+            function undo() {
+                if (rom.canUndo()) rom.undo();
+            }
+
+            function redo() {
+                if (rom.canRedo()) rom.redo();
+            }
+
+            function showSettings() {
+                if (rom) rom.showSettings();
+            }
+
+            function showAbout() {
+                var content = openModal('About FF4 Text Editor');
+                var p = document.createElement('p');
+                content.appendChild(p);
+                p.innerHTML = 'FF4 SNES Text Editor is a web-based editor for ' +
+                    'Final Fantasy IV SNES (Super Famicom) Japanese ROM text.';
+
+                p = document.createElement('p');
+                content.appendChild(p);
+                p.innerHTML = 'This tool allows you to edit dialogue, item names, ' +
+                    'spell names, and other text in the FFIV JP ROM.';
+
+                p = document.createElement('p');
+                content.appendChild(p);
+                p.innerHTML = 'Based on FF6Tools by everything8215. ' +
+                    'FINAL FANTASY, all characters and related ' +
+                    'articles belong solely to Square Enix Holdings Co., ' +
+                    'Ltd. No breach of copyright intended.';
+            }
+
+        </script>
+    </head>
+
+    <body>
+        <div id="outer">
+
+            <div id="topbar">
+                <button class="icon-btn float-left"
+                        onclick="document.getElementById('rom-file').click();"
+                        aria-label="Open ROM"
+                        data-balloon-pos="down-left">
+                    <i class="fas fa-folder-open"></i>
+                </button>
+                <input id="rom-file"
+                       type="file"
+                       style="display:none;"
+                       name="file"/>
+                <button class="icon-btn float-left"
+                        onclick="saveROM()"
+                        aria-label="Save ROM"
+                        data-balloon-pos="down">
+                    <i class="fas fa-save"></i>
+                </button>
+                <button class="icon-btn float-left"
+                        onclick="undo()"
+                        aria-label="Undo"
+                        data-balloon-pos="down">
+                    <i class="fas fa-undo"></i>
+                </button>
+                <button class="icon-btn float-left"
+                        onclick="redo()"
+                        aria-label="Redo"
+                        data-balloon-pos="down">
+                    <i class="fas fa-redo"></i>
+                </button>
+                <button class="icon-btn float-left"
+                        onclick="showSettings()"
+                        aria-label="ROM Settings"
+                        data-balloon-pos="down">
+                    <i class="fas fa-cog"></i>
+                </button>
+                <button class="icon-btn float-left"
+                        onclick="showAbout()"
+                        aria-label="About FF4 Text Editor"
+                        data-balloon-pos="down">
+                    <i class="fas fa-question"></i>
+                </button>
+
+                <button class="icon-btn float-right"
+                        onclick="togglePane('right-pane')"
+                        aria-label="Show/Hide Text List"
+                        data-balloon-pos="down-right">
+                    <i class="fas fa-angle-double-right"></i>
+                </button>
+                <button class="icon-btn float-right"
+                        onclick="togglePane('left-pane')"
+                        aria-label="Show/Hide Navigator"
+                        data-balloon-pos="down">
+                    <i class="fas fa-angle-double-left"></i>
+                </button>
+            </div>
+
+            <div id="main">
+                <div id="left-pane"></div>
+
+                <div id="center-pane">
+                    <div id="edit-top" class="background-gradient">
+                        <div id="edit-controls" class="hidden">
+                        </div>
+
+                        <div id="edit-div" class="no-select"></div>
+                    </div>
+                </div>
+
+                <div id="right-pane">
+                    <div id="right-pane-bottom">
+                        <div id="properties-bar">
+                            <button class="icon-btn"
+                                    disabled onclick="propertyList.selectPrevious()"
+                                    aria-label="Select Previous"
+                                    data-balloon-pos="down-left">
+                                <i class="fas fa-arrow-left"></i>
+                            </button>
+                            <button class="icon-btn"
+                                    disabled onclick="propertyList.selectNext()"
+                                    aria-label="Select Next"
+                                    data-balloon-pos="down">
+                                <i class="fas fa-arrow-right"></i>
+                            </button>
+                        </div>
+                        <div id="properties"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="menu-div"></div>
+
+        <div id="modal">
+            <div id="modal-window">
+                <span id="modal-close">
+                    <i class="fas fa-times"></i>
+                </span>
+                <p id="modal-title"></p>
+                <div id="modal-content"></div>
+            </div>
+        </div>
+
+        <script>
+            function togglePane(p) {
+                var pane = document.getElementById(p);
+                if (pane.classList.contains('hidden')) {
+                    pane.classList.remove('hidden');
+                } else {
+                    pane.classList.add('hidden');
+                }
+            }
+        </script>
+    </body>
+</html>
